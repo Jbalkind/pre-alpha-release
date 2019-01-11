@@ -29,10 +29,15 @@ module transducer
     ,parameter bp_cce_lce_data_cmd_width_lp=`bp_cce_lce_data_cmd_width(num_cce_p, num_lce_p, addr_width_p, block_size_in_bits_lp, lce_assoc_p)
 
     ,parameter harden_p=0
+
+    ,parameter lg_block_size_in_bytes_lp=`BSG_SAFE_CLOG2(block_size_in_bytes_p)
+    ,parameter lg_lce_sets_lp=`BSG_SAFE_CLOG2(lce_sets_p)
+    ,parameter lg_num_lce_lp=`BSG_SAFE_CLOG2(num_lce_p)
   )
   (
     input                                                  clk_i
     ,input                                                 reset_i
+    ,output                                                reset_done_o
 
     // LCE-CCE Interface
 
@@ -118,6 +123,62 @@ module transducer
   logic [bp_lce_cce_data_resp_width_lp-1:0]      icache_lce_data_resp_to_tr;
   logic                                          icache_lce_data_resp_v_to_tr;
   logic                                          icache_lce_data_resp_yumi_from_tr;
+
+  logic l15_noc2decoder_ack;
+  logic l15_noc2decoder_header_ack;
+  logic noc2decoder_l15_val;
+  logic [`L15_MSHR_ID_WIDTH-1:0] noc2decoder_l15_mshrid;
+  logic noc2decoder_l15_l2miss;
+  logic noc2decoder_l15_icache_type;
+  logic noc2decoder_l15_f4b;
+  logic [`MSG_TYPE_WIDTH-1:0] noc2decoder_l15_reqtype;
+  logic [`L15_MESI_STATE_WIDTH-1:0] noc2decoder_l15_ack_state;
+  logic [63:0] noc2decoder_l15_data_0;
+  logic [63:0] noc2decoder_l15_data_1;
+  logic [63:0] noc2decoder_l15_data_2;
+  logic [63:0] noc2decoder_l15_data_3;
+  logic [63:0] noc2decoder_l15_data_4;
+  logic [63:0] noc2decoder_l15_data_5;
+  logic [63:0] noc2decoder_l15_data_6;
+  logic [63:0] noc2decoder_l15_data_7;
+  logic [`L15_PADDR_HI:0] noc2decoder_l15_address;
+  logic [3:0] noc2decoder_l15_fwd_subcacheline_vector;
+  logic [`PACKET_HOME_ID_WIDTH-1:0] noc2decoder_l15_src_homeid;
+  
+  logic [`L15_CSM_NUM_TICKETS_LOG2-1:0] noc2decoder_l15_csm_mshrid;
+  logic [`L15_THREADID_MASK] noc2decoder_l15_threadid;
+  logic noc2decoder_l15_hmc_fill;
+
+  // Look for interrupt packet
+  logic                                          reset_int_recv;
+  logic                                          reset_int_recv_r;
+  logic                                          noc1_ready_with_reset;
+
+  assign noc1_ready_with_reset = noc1_ready_i & reset_int_recv_r;
+
+  always_ff @(posedge clk_i) begin
+      if (~rst_n) begin
+          reset_int_recv_r <= 1'b0;
+      end
+      else if (reset_int_recv) begin
+          reset_int_recv_r <= 1'b1;
+      end
+  end
+
+  always_comb begin
+      if (noc2decoder_l15_val & (noc2decoder_l15_reqtype == `MSG_TYPE_INTERRUPT)) begin
+        if (noc2decoder_l15_data_0[17:16] == 2'b01) begin
+            reset_int_recv = 1'b1;
+        end
+        else begin
+            reset_int_recv = 1'b0;
+        end
+      end
+      else begin
+          reset_int_recv = 1'b0;
+      end
+  end
+
 
   // Inbound LCE to Transducer - D$
   bsg_two_fifo
@@ -229,44 +290,22 @@ simplenocbuffer simplenocbuffer(
     .clk(clk_i),
     .rst_n(rst_n),
     // inputs
-    .noc_in_val(noc2_in_val),
-    .noc_in_data(noc2_in_data),
+    .noc_in_val(noc2_v_i),
+    .noc_in_data(noc2_data_i),
     .msg_ack(noc2_data_ack),
     // outputs
-    .noc_in_rdy(noc2_in_rdy),
+    .noc_in_rdy(noc2_ready_o),
     .msg(noc2_data),
     .msg_val(noc2_data_val)
 );
 
-logic l15_noc2decoder_ack;
-logic l15_noc2decoder_header_ack;
-logic noc2decoder_l15_val;
-logic [`L15_MSHR_ID_WIDTH-1:0] noc2decoder_l15_mshrid;
-logic noc2decoder_l15_l2miss;
-logic noc2decoder_l15_icache_type;
-logic noc2decoder_l15_f4b;
-logic [`MSG_TYPE_WIDTH-1:0] noc2decoder_l15_reqtype;
-logic [`L15_MESI_STATE_WIDTH-1:0] noc2decoder_l15_ack_state;
-logic [63:0] noc2decoder_l15_data_0;
-logic [63:0] noc2decoder_l15_data_1;
-logic [63:0] noc2decoder_l15_data_2;
-logic [63:0] noc2decoder_l15_data_3;
-logic [63:0] noc2decoder_l15_data_4;
-logic [63:0] noc2decoder_l15_data_5;
-logic [63:0] noc2decoder_l15_data_6;
-logic [63:0] noc2decoder_l15_data_7;
-logic [`L15_PADDR_HI:0] noc2decoder_l15_address;
-logic [3:0] noc2decoder_l15_fwd_subcacheline_vector;
-logic [`PACKET_HOME_ID_WIDTH-1:0] noc2decoder_l15_src_homeid;
-
-logic [`L15_CSM_NUM_TICKETS_LOG2-1:0] noc2decoder_l15_csm_mshrid;
-logic [`L15_THREADID_MASK] noc2decoder_l15_threadid;
-logic noc2decoder_l15_hmc_fill;
 
 /*
     noc2decoder takes the data from the buffer and decode it to meaningful signals
     to the l15
 */
+assign l15_noc2decoder_ack = noc2_data_val;
+assign l15_noc2decoder_header_ack = noc2_data_val;
 noc2decoder noc2decoder(
     .clk(clk_i),
     .rst_n(rst_n),
@@ -497,13 +536,13 @@ noc1encoder noc1encoder(
     .chipid(chipid),
     .coreid_x(coreid_x),
     .coreid_y(coreid_y),
-    .noc1out_ready(noc1_out_rdy),
+    .noc1out_ready(noc1_ready_with_reset),
     
     .l15_dmbr_l1missIn(l15_dmbr_l1missIn),
     .l15_dmbr_l1missTag(l15_dmbr_l1missTag),
     .noc1encoder_noc1buffer_req_ack(noc1encoder_noc1buffer_req_ack),
-    .noc1encoder_noc1out_val(noc1_out_val),
-    .noc1encoder_noc1out_data(noc1_out_data),
+    .noc1encoder_noc1out_val(noc1_v_o),
+    .noc1encoder_noc1out_data(noc1_data_o),
     
     // csm interface
     .noc1encoder_csm_req_ack(noc1encoder_csm_req_ack),
@@ -588,10 +627,10 @@ noc3encoder noc3encoder(
     .chipid(chipid),
     .coreid_x(coreid_x),
     .coreid_y(coreid_y),
-    .noc3out_ready(noc3_out_rdy),
+    .noc3out_ready(noc3_ready_i),
     .noc3encoder_l15_req_ack(noc3encoder_noc3buffer_req_ack),
-    .noc3encoder_noc3out_val(noc3_out_val),
-    .noc3encoder_noc3out_data(noc3_out_data)
+    .noc3encoder_noc3out_val(noc3_v_o),
+    .noc3encoder_noc3out_data(noc3_data_o)
 );
 
 
@@ -607,7 +646,8 @@ noc3encoder noc3encoder(
  *
  * CCE to LCE messages
  *
- *
+ * cce_lce_set_clear_cmd: internal between transducer and LCEs
+ * cce_lce_sync_cmd: internal between transducer and LCEs
  *
  *
  * NoC1 (low priority)
@@ -641,49 +681,218 @@ noc3encoder noc3encoder(
   `declare_bp_cce_lce_data_cmd_s(num_cce_p, num_lce_p, addr_width_p, block_size_in_bits_lp, lce_assoc_p);
   `declare_bp_lce_lce_tr_resp_s(num_lce_p, addr_width_p, block_size_in_bits_lp, lce_assoc_p);
 
-  // Registers for LCE to CCE messages
+  // Registers for LCE to CCE messages - these get shared by I$ and D$ channels
   bp_lce_cce_req_s          lce_req_r;
   bp_lce_cce_resp_s         lce_resp_r;
   bp_lce_cce_data_resp_s    lce_data_resp_r;
 
-  // Registers for CCE to LCE messages
-  bp_cce_lce_cmd_s          lce_cmd_r;
-  bp_cce_lce_data_cmd_s     lce_data_cmd_r;
+  // Registers for CCE to LCE messages - these are unique per I$ and D$
+  bp_cce_lce_cmd_s          dcache_lce_cmd_r;
+  bp_cce_lce_cmd_s          icache_lce_cmd_r;
+  bp_cce_lce_data_cmd_s     dcache_lce_data_cmd_r;
+  bp_cce_lce_data_cmd_s     icache_lce_data_cmd_r;
 
+  always_comb begin
+    dcache_lce_cmd_o = dcache_lce_cmd_r;
+    icache_lce_cmd_o = icache_lce_cmd_r;
+    dcache_lce_data_cmd_o = dcache_lce_data_cmd_r;
+    icache_lce_data_cmd_o = icache_lce_data_cmd_r;
+  end
 
   typedef enum logic [4:0] {
-    RESET
+    RESET_SET_CLEAR
+    ,RESET_SYNC
+    ,RESET_SYNC_ACK
     ,READY
     ,LCE_REQ
+    ,LCE_REQ_END
     ,LCE_RESP
     ,LCE_DATA_RESP
     ,SEND_CCE_CMD
     ,SEND_CCE_DATA_CMD
+    ,SEND_ICACHE_END
   } transducer_state_e;
 
   transducer_state_e trans_state;
 
   logic icache_req_r;
-  logic 
+  logic [lg_lce_sets_lp:0] set_count_r;
 
-  always_ff begin
+  logic [lg_num_lce_lp:0] sync_count_r;
+  logic [lg_num_lce_lp:0] sync_ack_count_r;
+
+  always_ff @(posedge clk_i) begin
     if (reset_i) begin
-      trans_state <= RESET;
+      trans_state <= RESET_SET_CLEAR;
       lce_req_r <= '0;
       lce_resp_r <= '0;
       lce_data_resp_r <= '0;
-      lce_cmd_r <= '0;
-      lce_data_cmd_r <='0;
-      icache_req_r <= '0;
+
+      dcache_lce_cmd_r <= '0;
+      dcache_lce_cmd_v_o <= 1'b0;
+      icache_lce_cmd_r <= '0;
+      icache_lce_cmd_v_o <= 1'b0;
+
+      dcache_lce_data_cmd_r <= '0;
+      dcache_lce_data_cmd_v_o <= 1'b0;
+      icache_lce_data_cmd_r <= '0;
+      icache_lce_data_cmd_v_o <= 1'b0;
+
+      icache_req_r <= 1'b0;
+      set_count_r <= '0;
+      sync_count_r <= '0;
+      sync_ack_count_r <= '0;
+
+      icache_lce_req_yumi_from_tr <= 1'b0;
+      icache_lce_resp_yumi_from_tr <= 1'b0;
+      icache_lce_data_resp_yumi_from_tr <= 1'b0;
+      dcache_lce_req_yumi_from_tr <= 1'b0;
+      dcache_lce_resp_yumi_from_tr <= 1'b0;
+      dcache_lce_data_resp_yumi_from_tr <= 1'b0;
+
+      l15_noc1buffer_req_data_0 <= '0;
+      l15_noc1buffer_req_data_1 <= '0;
+      l15_noc1buffer_req_val <= '0;
+      l15_noc1buffer_req_type <= '0;
+      l15_noc1buffer_req_threadid <= '0;
+      l15_noc1buffer_req_mshrid <= '0;
+      l15_noc1buffer_req_address <= '0;
+      l15_noc1buffer_req_non_cacheable <= '0;
+      l15_noc1buffer_req_size <= '0;
+      l15_noc1buffer_req_prefetch <= '0;
+      l15_noc1buffer_req_csm_data <= '0;
+      
+      l15_noc1buffer_req_csm_ticket <= '0;
+      l15_noc1buffer_req_homeid <= '0;
+      l15_noc1buffer_req_homeid_val <= '0;
+
+      l15_noc3encoder_req_val <= '0;
+      l15_noc3encoder_req_type <= '0;
+      l15_noc3encoder_req_data_0 <= '0;
+      l15_noc3encoder_req_data_1 <= '0;
+      l15_noc3encoder_req_data_2 <= '0;
+      l15_noc3encoder_req_data_3 <= '0;
+      l15_noc3encoder_req_data_4 <= '0;
+      l15_noc3encoder_req_data_5 <= '0;
+      l15_noc3encoder_req_data_6 <= '0;
+      l15_noc3encoder_req_data_7 <= '0;
+      l15_noc3encoder_req_mshrid <= '0;
+      l15_noc3encoder_req_sequenceid <= '0;
+      l15_noc3encoder_req_threadid <= '0;
+      l15_noc3encoder_req_address <= '0;
+      l15_noc3encoder_req_with_data <= '0;
+      l15_noc3encoder_req_was_inval <= '0;
+      l15_noc3encoder_req_fwdack_vector <= '0;
+      l15_noc3encoder_req_homeid <= '0;
+
+
     end else begin
       case (trans_state)
-        RESET: begin
-          trans_state <= READY;
-          // TODO: send set_clear messages to I$ and D$
-          // TODO: send sync messages to I$ and D$
-          // TODO: receive sync_ack messages from I$ and D$
+        RESET_SET_CLEAR: begin
+          if (set_count_r < lce_sets_p) begin
+            if (dcache_lce_cmd_ready_i && icache_lce_cmd_ready_i) begin
+              dcache_lce_cmd_v_o <= 1'b1;
+              dcache_lce_cmd_r.dst_id <= 1'b1;
+              dcache_lce_cmd_r.src_id <= 1'b0;
+              dcache_lce_cmd_r.msg_type <= e_lce_cmd_set_clear;
+              dcache_lce_cmd_r.addr <= (set_count_r << (lg_block_size_in_bytes_lp));
+              dcache_lce_cmd_r.way_id <= '0;
+              dcache_lce_cmd_r.state <= '0;
+              dcache_lce_cmd_r.target <= '0;
+              dcache_lce_cmd_r.target_way_id <= '0;
+
+              icache_lce_cmd_v_o <= 1'b1;
+              icache_lce_cmd_r.dst_id <= 1'b0;
+              icache_lce_cmd_r.src_id <= 1'b0;
+              icache_lce_cmd_r.msg_type <= e_lce_cmd_set_clear;
+              icache_lce_cmd_r.addr <= (set_count_r << (lg_block_size_in_bytes_lp));
+              icache_lce_cmd_r.way_id <= '0;
+              icache_lce_cmd_r.state <= '0;
+              icache_lce_cmd_r.target <= '0;
+              icache_lce_cmd_r.target_way_id <= '0;
+
+              set_count_r <= set_count_r + 'd1;
+
+            end else begin
+              dcache_lce_cmd_r <= '0;
+              dcache_lce_cmd_v_o <= 1'b0;
+              icache_lce_cmd_r <= '0;
+              icache_lce_cmd_v_o <= 1'b0;
+            end
+          end else begin
+            dcache_lce_cmd_r <= '0;
+            dcache_lce_cmd_v_o <= 1'b0;
+            icache_lce_cmd_r <= '0;
+            icache_lce_cmd_v_o <= 1'b0;
+            trans_state <= RESET_SYNC;
+          end
+        end
+        RESET_SYNC: begin
+          if (sync_count_r < num_lce_p) begin
+            if (dcache_lce_cmd_ready_i && icache_lce_cmd_ready_i) begin
+              dcache_lce_cmd_v_o <= 1'b1;
+              dcache_lce_cmd_r.dst_id <= 1'b1;
+              dcache_lce_cmd_r.src_id <= 1'b0;
+              dcache_lce_cmd_r.msg_type <= e_lce_cmd_sync;
+              dcache_lce_cmd_r.addr <= '0;
+              dcache_lce_cmd_r.way_id <= '0;
+              dcache_lce_cmd_r.state <= '0;
+              dcache_lce_cmd_r.target <= '0;
+              dcache_lce_cmd_r.target_way_id <= '0;
+
+              icache_lce_cmd_v_o <= 1'b1;
+              icache_lce_cmd_r.dst_id <= 1'b0;
+              icache_lce_cmd_r.src_id <= 1'b0;
+              icache_lce_cmd_r.msg_type <= e_lce_cmd_sync;
+              icache_lce_cmd_r.addr <= '0;
+              icache_lce_cmd_r.way_id <= '0;
+              icache_lce_cmd_r.state <= '0;
+              icache_lce_cmd_r.target <= '0;
+              icache_lce_cmd_r.target_way_id <= '0;
+
+              sync_count_r <= sync_count_r + 'd2;
+
+            end else begin
+              dcache_lce_cmd_r <= '0;
+              dcache_lce_cmd_v_o <= 1'b0;
+              icache_lce_cmd_r <= '0;
+              icache_lce_cmd_v_o <= 1'b0;
+            end
+          end else begin
+            dcache_lce_cmd_r <= '0;
+            dcache_lce_cmd_v_o <= 1'b0;
+            icache_lce_cmd_r <= '0;
+            icache_lce_cmd_v_o <= 1'b0;
+            trans_state <= RESET_SYNC_ACK;
+          end
+        end
+        RESET_SYNC_ACK: begin
+          icache_lce_resp_yumi_from_tr <= 1'b0;
+          dcache_lce_resp_yumi_from_tr <= 1'b0;
+          if (sync_ack_count_r < num_lce_p) begin
+            if (icache_lce_resp_v_to_tr && dcache_lce_resp_v_to_tr) begin
+              icache_lce_resp_yumi_from_tr <= 1'b1;
+              lce_resp_r <= icache_lce_resp_to_tr;
+              dcache_lce_resp_yumi_from_tr <= 1'b1;
+              lce_resp_r <= dcache_lce_resp_to_tr;
+              sync_ack_count_r <= sync_ack_count_r + 'd2;
+            end else begin
+              dcache_lce_resp_yumi_from_tr <= 1'b0;
+              icache_lce_resp_yumi_from_tr <= 1'b0;
+              lce_resp_r <= '0;
+            end
+          end else begin
+            dcache_lce_resp_yumi_from_tr <= 1'b0;
+            icache_lce_resp_yumi_from_tr <= 1'b0;
+            lce_resp_r <= '0;
+            trans_state <= READY;
+          end
         end
         READY: begin
+          dcache_lce_resp_yumi_from_tr <= 1'b0;
+          icache_lce_resp_yumi_from_tr <= 1'b0;
+          dcache_lce_cmd_v_o <= 1'b0;
+          icache_lce_cmd_v_o <= 1'b0;
           // prefer icache requests over dcache requests
           if (icache_lce_req_v_to_tr) begin
             lce_req_r <= icache_lce_req_to_tr;
@@ -694,7 +903,48 @@ noc3encoder noc3encoder(
             lce_req_r <= dcache_lce_req_to_tr;
             dcache_lce_req_yumi_from_tr <= 1'b1;
             trans_state <= LCE_REQ;
+          end else if (noc2decoder_l15_val && noc2decoder_l15_reqtype != `MSG_TYPE_INTERRUPT) begin // TODO: receive response from and send to LCE
+          // For now, assume that we process only I$ requests
+            if (icache_lce_cmd_ready_i && icache_lce_data_cmd_ready_i) begin
+              // TODO: populate cmd and data_cmd fields
+              icache_lce_cmd_r.dst_id <= '0;
+              icache_lce_cmd_r.src_id <= '0;
+              icache_lce_cmd_r.msg_type <= e_lce_cmd_set_tag;
+              icache_lce_cmd_r.addr <= lce_req_r.addr;
+              icache_lce_cmd_r.way_id <= lce_req_r.lru_way_id;
+              icache_lce_cmd_r.state <= e_MESI_E; // return in E instead of S due to BP implementation
+              icache_lce_cmd_r.target <= '0;
+              icache_lce_cmd_r.target_way_id <= '0;
+              // assert valid
+              icache_lce_cmd_v_o <= 1'b1;
+
+              icache_lce_data_cmd_r.dst_id <= '0;
+              icache_lce_data_cmd_r.src_id <= '0;
+              icache_lce_data_cmd_r.msg_type <= e_lce_req_type_rd;
+              icache_lce_data_cmd_r.way_id <= lce_req_r.lru_way_id;
+              icache_lce_data_cmd_r.addr <= lce_req_r.addr;
+              icache_lce_data_cmd_r.data <= {
+                                             noc2decoder_l15_data_0
+                                             ,noc2decoder_l15_data_1
+                                             ,noc2decoder_l15_data_2
+                                             ,noc2decoder_l15_data_3
+                                             ,noc2decoder_l15_data_4
+                                             ,noc2decoder_l15_data_5
+                                             ,noc2decoder_l15_data_6
+                                             ,noc2decoder_l15_data_7
+                                            };
+
+              // assert valid
+              icache_lce_data_cmd_v_o <= 1'b1;
+
+              trans_state <= SEND_ICACHE_END;
+            end
           end
+        end
+        SEND_ICACHE_END: begin
+          icache_lce_cmd_v_o <= 1'b0;
+          icache_lce_data_cmd_v_o <= 1'b0;
+          trans_state <= READY;
         end
         LCE_REQ: begin
           icache_lce_req_yumi_from_tr <= '0;
@@ -702,9 +952,12 @@ noc3encoder noc3encoder(
 
           l15_noc1buffer_req_val <= 1'b1;
           if (icache_req_r) begin
-            l15_noc1buffer_req_type <= `L15_NOC1_REQTYPE_IFILL_REQUEST;
+            l15_noc1buffer_req_type <= `L15_NOC1_REQTYPE_LD_REQUEST;
             icache_req_r <= '0;
           //end else begin
+          // TODO: how do we know that request should be Rd or RdEx?
+          // LCE does not send any information about this because it is tracked by
+          // the CCE.
           //  l15_noc1buffer_req_type <= `L15_NOC1_REQTYPE_
           end
 
@@ -720,13 +973,15 @@ noc3encoder noc3encoder(
           l15_noc1buffer_req_data_0 <= '0;
           l15_noc1buffer_req_data_1 <= '0;
 
+          trans_state <= LCE_REQ_END;
+
         end
         LCE_REQ_END: begin
           l15_noc1buffer_req_val <= '0;
           trans_state <= READY;
         end
         default: begin
-          trans_state <= RESET;
+          trans_state <= RESET_SET_CLEAR;
         end
       endcase
     end
